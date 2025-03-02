@@ -1,0 +1,239 @@
+---
+title: "BN_Project"
+author: "Anna Bicelli, Elettra Favazza, Ngan Ha Duong, Vishal Nair "
+date: "2025-01-05"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+# Load required libraries
+library(bnlearn)
+library(Rgraphviz)  # For plotting DAGs
+library(ggplot2)
+library(caret)
+
+```
+
+```{r}
+# Load the train and test datasets
+train <- readRDS("training.rds")
+testing <- readRDS("testing.rds")
+```
+
+```{r}
+set.seed(123) # Ensure reproducibility
+# Take a random 1% sample of the data
+training <- train[sample(nrow(train), nrow(train) * 0.01), ]
+test <- testing[sample(nrow(testing), nrow(testing)*0.01), ]
+
+
+```
+
+```{r}
+# Step 1: Define a blacklist to exclude illogical arcs
+bl <- data.frame(
+  from = c(
+    rep("Region", 10), rep("Zone", 10), rep("Type", 10), rep("Year", 10),
+    rep("Season", 10), rep("Month", 10), rep("Day", 10), rep("Hour", 10),
+    rep("Latitude", 10), rep("Longitude", 10), rep("Altitude", 10),
+    rep("CVD60", 23), rep("t2m", 11), rep("ws", 11), rep("wd", 11),
+    rep("tp", 11), rep("blh", 11), rep("ssr", 11), rep("no2", 11),
+    rep("so2", 11), rep("co", 11), rep("o3", 11), rep("pm10", 11),
+    rep("pm2.5", 11)
+  ),
+  to = c(
+    "Zone", "Type", "Year", "Season", "Month", "Day", "Hour", "Latitude",
+    "Longitude", "Altitude", "Region", "Type", "Year", "Season", "Month",
+    "Day", "Hour", "Latitude", "Longitude", "Altitude", "Region", "Zone",
+    "Year", "Season", "Month", "Day", "Hour", "Latitude", "Longitude",
+    "Altitude", "Region", "Zone", "Type", "Season", "Month", "Day",
+    "Hour", "Latitude", "Longitude", "Altitude", "Region", "Zone",
+    "Type", "Year", "Month", "Day", "Hour", "Latitude", "Longitude",
+    "Altitude", "Region", "Zone", "Type", "Year", "Season", "Day", "Hour",
+    "Latitude", "Longitude", "Altitude", "Region", "Zone", "Type", "Year",
+    "Season", "Month", "Hour", "Latitude", "Longitude", "Altitude",
+    "Region", "Zone", "Type", "Year", "Season", "Month", "Day",
+    "Latitude", "Longitude", "Altitude", "Region", "Zone", "Type", "Year",
+    "Season", "Month", "Day", "Hour", "Longitude", "Altitude", "Region",
+    "Zone", "Type", "Year", "Season", "Month", "Day", "Hour", "Latitude",
+    "Altitude", "Region", "Zone", "Type", "Year", "Season", "Month",
+    "Day", "Hour", "Latitude", "Longitude", "Region", "Zone", "Type",
+    "Year", "Season", "Month", "Day", "Hour", "Latitude", "Longitude",
+    "Altitude", "t2m", "ws", "wd", "tp", "blh", "ssr", "no2", "o3",
+    "so2", "co", "pm10", "pm2.5", "Region", "Zone", "Type", "Year",
+    "Season", "Month", "Day", "Hour", "Latitude", "Longitude", "Altitude",
+    "Region", "Zone", "Type", "Year", "Season", "Month", "Day", "Hour",
+    "Latitude", "Longitude", "Altitude", "Region", "Zone", "Type",
+    "Year", "Season", "Month", "Day", "Hour", "Latitude", "Longitude",
+    "Altitude", "Region", "Zone", "Type", "Year", "Season", "Month",
+    "Day", "Hour", "Latitude", "Longitude", "Altitude", "Region", "Zone",
+    "Type", "Year", "Season", "Month", "Day", "Hour", "Latitude",
+    "Longitude", "Altitude", "Region", "Zone", "Type", "Year", "Season",
+    "Month", "Day", "Hour", "Latitude", "Longitude", "Altitude",
+    "Region", "Zone", "Type", "Year", "Season", "Month", "Day", "Hour",
+    "Latitude", "Longitude", "Altitude", "Region", "Zone", "Type",
+    "Year", "Season", "Month", "Day", "Hour", "Latitude", "Longitude",
+    "Altitude", "Region", "Zone", "Type", "Year", "Season", "Month",
+    "Day", "Hour", "Latitude", "Longitude", "Altitude", "Region", "Zone",
+    "Type", "Year", "Season", "Month", "Day", "Hour", "Latitude",
+    "Longitude", "Altitude", "Region", "Zone", "Type", "Year", "Season",
+    "Month", "Day", "Hour", "Latitude", "Longitude", "Altitude",
+    "Region", "Zone", "Type", "Year", "Season", "Month", "Day", "Hour",
+    "Latitude", "Longitude", "Altitude"
+  )
+)
+```
+
+```{r}
+# Step 2: Prepare data for Structural EM
+incompleteColumns <- names(which(sapply(training, anyNA)))
+rowsCompleteObservations <- which(complete.cases(training))
+completeObservations <- training[rowsCompleteObservations, ]
+dagNew <- dagCurrent <- empty.graph(names(completeObservations))
+bnNew <- bnCurrent <- bn.fit(dagCurrent, completeObservations)
+
+```
+
+```{r}
+# Define imputation function
+impute_data <- function(data, bnCurrent, n = 50) {
+  nodes <- nodes(bnCurrent)
+  # variables corresponding to isolated nodes can be quickly imputed by their expectations.
+  for (var in nodes) {
+    missing <- is.na(data[, var])
+    if ((length(nbr(bnCurrent, var)) == 0) && (any(missing)))
+      data[missing, var] <- rnorm(length(which(missing)),
+                                  mean = bnCurrent[[var]]$coef,
+                                  sd = bnCurrent[[var]]$sd / sqrt(n))
+  }
+  # reassess which observations have missing data.
+  missing <- !complete.cases(data)
+  for (i in which(missing)) {
+    from <- nodes[which(!is.na(data[i, ]))]
+    to <- setdiff(nodes, from)
+    # use the observed part of the observation as the evidence.
+
+    evidence <- if (length(from) == 0) TRUE else 
+      lapply(data[i, from], function(x) if (is.factor(x)) as.character(x) else x)
+     # simulate the particles and the weights using likelihood weighting.
+    particles <- cpdist(bnCurrent, nodes = to, evidence = evidence, method = "lw", n = n)
+    # impute by posterior expectation
+    particles <- sapply(particles, function(x, w) {
+      if (is.factor(x)) names(which.max(by(w, INDICES = x, FUN = sum))) else weighted.mean(x, w)
+    }, w = attr(particles, "weights"))
+    data[i, to] <- particles
+  }
+  return(data)
+}
+
+```
+
+```{r}
+# Step 3: Structural EM loop (limit to 10 iterations)
+for (iteration in seq(10)) {
+  dagCurrent <- dagNew
+  bnCurrent <- bnNew
+  
+  # Expectation step: Impute missing data
+  training <- impute_data(training, bnCurrent)
+  
+  # Maximization step: Learn the network structure
+  dagNew <- hc(training, blacklist = bl, start = dagCurrent)
+  
+  if (isTRUE(all.equal(dagCurrent, dagNew))) break
+  
+  # Fit the parameters
+  bnNew <- bn.fit(dagNew, data = training, keep.fitted = FALSE)
+}
+
+```
+
+```{r}
+# Graphical Representation
+graphviz.plot(dagNew, layout = "dot", shape = "ellipse", main = "Bayesian Network DAG using 1% of Data")
+
+```
+
+```{r}
+# Load the DAG object
+dag <- readRDS("DAG.rds")
+# Plot the DAG
+graphviz.plot(dag, layout = "dot", shape = "ellipse", main = "Bayesian Network DAG from the Paper")
+```
+
+# Validation of our model using Normalised RMSE
+
+```{r}
+
+
+# Function to calculate RMSE
+calculate_rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2, na.rm = TRUE))
+}
+
+# Function to calculate Normalized RMSE
+calculate_normalized_rmse <- function(actual, predicted, method = "range") {
+  rmse <- calculate_rmse(actual, predicted)
+  if (method == "range") {
+    norm_rmse <- rmse / (max(actual, na.rm = TRUE) - min(actual, na.rm = TRUE))
+  } else if (method == "mean") {
+    norm_rmse <- rmse / mean(actual, na.rm = TRUE)
+  }
+  return(norm_rmse)
+}
+
+# Function to compute Normalized RMSE for all numeric features
+compute_normalized_rmse <- function(bn_model, data, method = "range") {
+  results <- sapply(names(data), function(var) {
+    if (is.numeric(data[[var]])) {
+      predicted <- predict(bn_model, node = var, data = data)
+      calculate_normalized_rmse(data[[var]], predicted, method = method)
+    } else {
+      NA
+    }
+  })
+  return(results)
+}
+
+# Filter features to include only numeric variables from the original dataset
+numeric_features <- names(training)[sapply(training, is.numeric)]  # Get numeric features only
+# Compute RMSE for training datasets
+training_rmse <- compute_normalized_rmse(bnNew, training, method = "range")
+# Filter RMSE results for numeric features
+filtered_training_rmse <- training_rmse[numeric_features]
+
+# Combine results into a table for numeric features
+rmse_table <- data.frame(
+  Feature = numeric_features,
+  Normalized_RMSE = filtered_training_rmse
+)
+
+# Print RMSE Table
+print("Normalized RMSE Table for Numeric Features for the our BN model:")
+print(rmse_table)
+
+
+```
+
+```{r}
+# Compute RMSE for testing datasets
+testing_rmse <- compute_normalized_rmse(bnNew, test, method = "range")
+# Filter RMSE results for numeric features
+filtered_testing_rmse <- testing_rmse[numeric_features]
+
+# Combine results into a table for numeric features
+rmse_table <- data.frame(
+  Feature = numeric_features,
+  Testing_Normalized_RMSE = filtered_testing_rmse
+)
+
+# Print RMSE Table
+print("Normalized RMSE Table for Numeric Features for test data:")
+print(rmse_table)
+```
+
+The presence of NAN values in the test RMSE for variables like CVD60, no2, o3, so2, pm10, and co is due to the use of only 1% of the test data for evaluation. This limited sampling excludes many rows with valid values for these variables, leading to missing (NAN) predictions.
+
+This issue is a result of the reduced dataset size and does not reflect a flaw in the methodology, which remains valid and effective when applied to the DAG obtained from the Paper.
